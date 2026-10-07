@@ -20,10 +20,12 @@ on:
 
 env:
   CLANG_VERSION: clang-r536225
-  KERNEL_REPO: OnePlusOSS/android_kernel_oneplus_sm8845
+  # The GKI common kernel is the only *complete* standalone tree.
+  # android_kernel_oneplus_sm8845 is a Qualcomm overlay layer (it has no
+  # fs/ block/ crypto/ security/ rust/ ...) and cannot run modules_prepare
+  # on its own, so it is not cloned at all.
+  KERNEL_REPO: OnePlusOSS/android_kernel_common_oneplus_sm8845
   KERNEL_REF: oneplus/sm8845_b_16.0.0_ace_6t
-  DT_REPO: OnePlusOSS/android_kernel_modules_and_devicetree_oneplus_sm8845
-  DT_REF: oneplus/sm8845_b_16.0.0_ace_6t
 
 jobs:
   lkm:
@@ -78,26 +80,27 @@ jobs:
           rm -f clang.tar.gz
           "$CLANG_VERSION/bin/clang" --version
 
-      - name: Clone kernel + display sources
+      - name: Cache kernel source
+        id: cache-kernel
+        uses: actions/cache@v4
+        with:
+          path: ksrc
+          key: ksrc-${{ env.KERNEL_REF }}-v2
+
+      - name: Clone kernel source
+        if: steps.cache-kernel.outputs.cache-hit != 'true'
         run: |
           set -e
+          # one snapshot, no history; the tree is cached so this only ever
+          # runs on the first build of a given branch
           git clone --depth 1 --single-branch -b "$KERNEL_REF" \
             "https://github.com/${KERNEL_REPO}.git" ksrc
-          git clone --depth 1 --single-branch -b "$DT_REF" \
-            "https://github.com/${DT_REPO}.git" dtsrc
-          du -sh ksrc dtsrc
-          # fallback tree: the GKI common kernel is a standalone tree that
-          # always supports `make modules_prepare`, unlike the vendor tree.
-          git clone --depth 1 --single-branch -b "$KERNEL_REF" \
-            "https://github.com/OnePlusOSS/android_kernel_common_oneplus_sm8845.git" ksrc-common
-          du -sh ksrc-common
+          du -sh ksrc
 
       - name: Build
         run: |
           export PLR110_CLANG="$PWD/toolchain/${{ env.CLANG_VERSION }}/bin/clang"
           export PLR110_KERNEL_SRC="$PWD/ksrc"
-          export PLR110_FALLBACK_KERNEL_SRC="$PWD/ksrc-common"
-          export PLR110_DISPLAY_SRC="$PWD/dtsrc/vendor/qcom/opensource/display-drivers"
           bash scripts/build_ci.sh
 
       - name: Package KernelSU module
