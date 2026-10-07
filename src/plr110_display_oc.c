@@ -18,9 +18,16 @@
 #include <linux/printk.h>
 #include <linux/string.h>
 #include <linux/kernel.h>
+#include <linux/utsname.h>
 #include <linux/version.h>
 
 #define PLR110_TAG "plr110_display_oc"
+
+/* The release string this build was produced for. The kernel ignores the
+ * version part of vermagic when a module carries CRCs (see
+ * kernel/module/version.c:same_magic), so this is informational only. */
+#define PLR110_BUILD_RELEASE \
+	"6.12.69-android16-6-g242e1a07f878-ab15865446-4k"
 
 #define plr110_info(fmt, ...) pr_info(PLR110_TAG ": " fmt, ##__VA_ARGS__)
 #define plr110_err(fmt, ...)  pr_err(PLR110_TAG ": " fmt, ##__VA_ARGS__)
@@ -199,7 +206,7 @@ static int install_mode_probe(void)
 	}
 
 	kp_set_mode.pre_handler = set_mode_pre;
-	kp_set_mode.addr = addr;
+	kp_set_mode.addr = (kprobe_opcode_t *)addr;
 
 	return register_kprobe(&kp_set_mode);
 }
@@ -210,8 +217,8 @@ static int __init plr110_init(void)
 {
 	int ret;
 
-	plr110_info("loading: built for %s\n", UTS_RELEASE);
-	plr110_info("vermagic tail must match: %s\n", VERMAGIC_STRING);
+	plr110_info("loading: built-for=%s running=%s\n",
+		    PLR110_BUILD_RELEASE, utsname()->release);
 	plr110_info("enable=%d dump_modes=%d target_hz=%u\n",
 		    enable, dump_modes, target_hz);
 
