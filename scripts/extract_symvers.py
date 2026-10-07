@@ -87,8 +87,21 @@ def main():
                 continue
             seen.setdefault(name, (crc, mod))
         print(f"# {path}: {len(pairs)} entries", file=sys.stderr)
+
+    # Module.symvers format expected by scripts/mod/modpost.c:read_dump():
+    #
+    #   0x%08x \t name \t module \t EXPORT_SYMBOL[_GPL] \t namespace
+    #
+    # All five fields are mandatory (the namespace is allowed to be empty).
+    #
+    # __versions only stores (crc, name), so the export type and namespace are
+    # not recoverable from the module. Our own module is GPL, so declaring
+    # EXPORT_SYMBOL (the permissive variant) can never produce a spurious
+    # "GPL only" failure. Namespaces are left empty; if the module ends up
+    # importing a namespaced symbol the kernel will reject it at load time and
+    # scripts/build_ci.sh dumps the undefined symbol list so it is visible.
     for name, (crc, mod) in sorted(seen.items()):
-        print(f"0x{crc:08x}\t{name}\t{mod}")
+        print(f"0x{crc:08x}\t{name}\t{mod}\tEXPORT_SYMBOL\t")
 
 
 if __name__ == "__main__":

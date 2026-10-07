@@ -167,6 +167,17 @@ make "${COMMON_ARGS[@]}" \
 
 KO="$(find "$SRC" -maxdepth 1 -name '*.ko' | head -1)"
 test -n "$KO" || { echo "::error::no .ko produced"; exit 1; }
-cp "$KO" "$OUT/" 
+cp "$KO" "$OUT/"
+
+# Show what the module actually imports. Namespaced symbols would need a
+# matching MODULE_IMPORT_NS() and would be rejected by the kernel at load time.
+log "undefined symbols imported by $(basename "$KO")"
+llvm-nm --undefined-only "$KO" 2>/dev/null | awk '{print $2}' \
+  | sed '/^$/d' | sort -u | tee -a "$LOG" | head -60
+
+log "vermagic / modinfo"
+llvm-objcopy -O binary --only-section=.modinfo "$KO" /tmp/.modinfo.bin 2>/dev/null && \
+  tr '\0' '\n' < /tmp/.modinfo.bin | tee -a "$LOG"
+
 log "built: $OUT/$(basename "$KO")"
 ls -la "$OUT/"

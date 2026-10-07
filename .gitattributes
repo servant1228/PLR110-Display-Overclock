@@ -6,3 +6,5 @@
 *.css text eol=lf
 *.html text eol=lf
 *.md text eol=lf
+configs/Module.symvers text eol=lf
+configs/kernel.release text eol=lf
