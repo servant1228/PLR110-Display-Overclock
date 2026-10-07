@@ -16,6 +16,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SRC="$ROOT/src"
 OUT="${PLR110_OUT:-$ROOT/out}"
 KERNEL_SRC="${PLR110_KERNEL_SRC:?PLR110_KERNEL_SRC is required}"
+FALLBACK_KERNEL_SRC="${PLR110_FALLBACK_KERNEL_SRC:-}"
 CLANG="${PLR110_CLANG:?PLR110_CLANG is required}"
 DISPLAY_SRC="${PLR110_DISPLAY_SRC:-}"
 VERMAGIC_FILE="${PLR110_VERMAGIC_FILE:-$ROOT/configs/kernel.release}"
@@ -52,30 +53,51 @@ else
   log "no configs/device.config* found - will use vendor tree default"
 fi
 
-COMMON_ARGS=(
-  -C "$KERNEL_SRC"
-  O="$OUT"
-  ARCH=arm64
-  LLVM=1
-  CC="$CLANG"
-  LD="${CLANG_DIR}/ld.lld"
-  HOSTCC=gcc
-  HOSTCXX=g++
-)
+make_args() {
+  echo -C "$1" O="$OUT" ARCH=arm64 LLVM=1 CC="$CLANG" \
+       LD="${CLANG_DIR}/ld.lld" HOSTCC=gcc HOSTCXX=g++
+}
 
 # --------------------------------------------------------------- prepare ----
-log "modules_prepare"
-if [ -f "$CFG" ]; then
-  case "$CFG" in
-    *.gz) zcat "$CFG" > "$OUT/.config" ;;
-    *)    cp "$CFG" "$OUT/.config" ;;
-  esac
-  make "${COMMON_ARGS[@]}" olddefconfig 2>&1 | tee -a "$LOG"
-else
-  make "${COMMON_ARGS[@]}" defconfig 2>&1 | tee -a "$LOG"
+prepare_tree() {
+  local tree="$1"
+
+  mkdir -p "$OUT"
+  if [ -f "$CFG" ]; then
+    case "$CFG" in
+      *.gz) zcat "$CFG" > "$OUT/.config" ;;
+      *)    cp "$CFG" "$OUT/.config" ;;
+    esac
+    make -C "$tree" O="$OUT" ARCH=arm64 LLVM=1 CC="$CLANG" \
+         LD="${CLANG_DIR}/ld.lld" HOSTCC=gcc HOSTCXX=g++ \
+         olddefconfig 2>&1 | tee -a "$LOG"
+  else
+    make -C "$tree" O="$OUT" ARCH=arm64 LLVM=1 CC="$CLANG" \
+         LD="${CLANG_DIR}/ld.lld" HOSTCC=gcc HOSTCXX=g++ \
+         defconfig 2>&1 | tee -a "$LOG"
+  fi
+
+  make -C "$tree" O="$OUT" ARCH=arm64 LLVM=1 CC="$CLANG" \
+       LD="${CLANG_DIR}/ld.lld" HOSTCC=gcc HOSTCXX=g++ \
+       modules_prepare 2>&1 | tee -a "$LOG"
+}
+
+log "modules_prepare (vendor tree: $KERNEL_SRC)"
+if ! prepare_tree "$KERNEL_SRC"; then
+  if [ -n "$FALLBACK_KERNEL_SRC" ] && [ -f "$FALLBACK_KERNEL_SRC/Makefile" ]; then
+    log "::warning::vendor tree prepare failed -> falling back to $FALLBACK_KERNEL_SRC"
+    rm -rf "$OUT"
+    mkdir -p "$OUT"
+    KERNEL_SRC="$FALLBACK_KERNEL_SRC"
+    prepare_tree "$KERNEL_SRC"
+  else
+    echo "::error::modules_prepare failed and no usable fallback tree"
+    exit 1
+  fi
 fi
 
-make "${COMMON_ARGS[@]}" modules_prepare 2>&1 | tee -a "$LOG"
+COMMON_ARGS=(-C "$KERNEL_SRC" O="$OUT" ARCH=arm64 LLVM=1 CC="$CLANG"
+              LD="${CLANG_DIR}/ld.lld" HOSTCC=gcc HOSTCXX=g++)
 
 # ---------------------------------------------------------- kernel.release --
 # The published source (6.12.38) is older than the target device (6.12.69).
@@ -106,10 +128,7 @@ else
 fi
 
 # ---------------------------------------------------------------- module ----
-EXTRA_SYMS=()
-[ -f "$OUT/Module.symvers" ] && EXTRA_SYMS=(-C "$KERNEL_SRC")
-
-log "building module"
+log "building module against $KERNEL_SRC"
 make "${COMMON_ARGS[@]}" \
   M="$SRC" \
   PLR110_DISPLAY_SRC="$DISPLAY_SRC" \

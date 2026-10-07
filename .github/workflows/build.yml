@@ -64,8 +64,8 @@ jobs:
           set -e
           mkdir -p toolchain
           cd toolchain
-          for ref in main android16-release android15-release; do
-            url="https://android.googlesource.com/kernel/prebuilts/clang/host/linux-x86/+archive/refs/heads/${ref}/${CLANG_VERSION}.tar.gz"
+          for ref in main; do
+            url="https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/${ref}/${CLANG_VERSION}.tar.gz"
             echo "trying $url"
             if curl -fsSL -o clang.tar.gz "$url"; then
               echo "OK from $ref"
@@ -78,17 +78,7 @@ jobs:
           rm -f clang.tar.gz
           "$CLANG_VERSION/bin/clang" --version
 
-      - name: Cache kernel source
-        id: cache-kernel
-        uses: actions/cache@v4
-        with:
-          path: |
-            ksrc
-            dtsrc
-          key: ksrc-${{ env.KERNEL_REF }}-${{ env.DT_REF }}-v1
-
       - name: Clone kernel + display sources
-        if: steps.cache-kernel.outputs.cache-hit != 'true'
         run: |
           set -e
           git clone --depth 1 --single-branch -b "$KERNEL_REF" \
@@ -96,11 +86,17 @@ jobs:
           git clone --depth 1 --single-branch -b "$DT_REF" \
             "https://github.com/${DT_REPO}.git" dtsrc
           du -sh ksrc dtsrc
+          # fallback tree: the GKI common kernel is a standalone tree that
+          # always supports `make modules_prepare`, unlike the vendor tree.
+          git clone --depth 1 --single-branch -b "$KERNEL_REF" \
+            "https://github.com/OnePlusOSS/android_kernel_common_oneplus_sm8845.git" ksrc-common
+          du -sh ksrc-common
 
       - name: Build
         run: |
           export PLR110_CLANG="$PWD/toolchain/${{ env.CLANG_VERSION }}/bin/clang"
           export PLR110_KERNEL_SRC="$PWD/ksrc"
+          export PLR110_FALLBACK_KERNEL_SRC="$PWD/ksrc-common"
           export PLR110_DISPLAY_SRC="$PWD/dtsrc/vendor/qcom/opensource/display-drivers"
           bash scripts/build_ci.sh
 
