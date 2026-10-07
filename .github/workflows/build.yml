@@ -1,0 +1,123 @@
+name: build
+
+on:
+  workflow_dispatch:
+    inputs:
+      kernel_repo:
+        description: "Vendor kernel repo"
+        default: "OnePlusOSS/android_kernel_oneplus_sm8845"
+      kernel_ref:
+        description: "Vendor kernel branch"
+        default: "oneplus/sm8845_b_16.0.0_ace_6t"
+  push:
+    branches: [main]
+    paths:
+      - "src/**"
+      - "scripts/**"
+      - "configs/**"
+      - "module/**"
+      - ".github/workflows/build.yml"
+
+env:
+  CLANG_VERSION: clang-r536225
+  KERNEL_REPO: OnePlusOSS/android_kernel_oneplus_sm8845
+  KERNEL_REF: oneplus/sm8845_b_16.0.0_ace_6t
+  DT_REPO: OnePlusOSS/android_kernel_modules_and_devicetree_oneplus_sm8845
+  DT_REF: oneplus/sm8845_b_16.0.0_ace_6t
+
+jobs:
+  lkm:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: false
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: false
+          docker-images: false
+          swap-storage: false
+
+      - name: Install deps
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq bc bison flex libssl-dev libelf-dev \
+            python3 python3-pip zip unzip kmod cpio rsync git curl
+
+      - name: Cache toolchain
+        id: cache-clang
+        uses: actions/cache@v4
+        with:
+          path: toolchain/${{ env.CLANG_VERSION }}
+          key: ${{ env.CLANG_VERSION }}
+
+      - name: Fetch Android Clang
+        if: steps.cache-clang.outputs.cache-hit != 'true'
+        run: |
+          set -e
+          mkdir -p toolchain
+          cd toolchain
+          for ref in main android16-release android15-release; do
+            url="https://android.googlesource.com/kernel/prebuilts/clang/host/linux-x86/+archive/refs/heads/${ref}/${CLANG_VERSION}.tar.gz"
+            echo "trying $url"
+            if curl -fsSL -o clang.tar.gz "$url"; then
+              echo "OK from $ref"
+              break
+            fi
+          done
+          test -s clang.tar.gz || { echo "::error::cannot download $CLANG_VERSION"; exit 1; }
+          mkdir -p "$CLANG_VERSION"
+          tar -xzf clang.tar.gz -C "$CLANG_VERSION"
+          rm -f clang.tar.gz
+          "$CLANG_VERSION/bin/clang" --version
+
+      - name: Cache kernel source
+        id: cache-kernel
+        uses: actions/cache@v4
+        with:
+          path: |
+            ksrc
+            dtsrc
+          key: ksrc-${{ env.KERNEL_REF }}-${{ env.DT_REF }}-v1
+
+      - name: Clone kernel + display sources
+        if: steps.cache-kernel.outputs.cache-hit != 'true'
+        run: |
+          set -e
+          git clone --depth 1 --single-branch -b "$KERNEL_REF" \
+            "https://github.com/${KERNEL_REPO}.git" ksrc
+          git clone --depth 1 --single-branch -b "$DT_REF" \
+            "https://github.com/${DT_REPO}.git" dtsrc
+          du -sh ksrc dtsrc
+
+      - name: Build
+        run: |
+          export PLR110_CLANG="$PWD/toolchain/${{ env.CLANG_VERSION }}/bin/clang"
+          export PLR110_KERNEL_SRC="$PWD/ksrc"
+          export PLR110_DISPLAY_SRC="$PWD/dtsrc/vendor/qcom/opensource/display-drivers"
+          bash scripts/build_ci.sh
+
+      - name: Package KernelSU module
+        run: bash scripts/package_ksu.sh
+
+      - name: Collect device-extracted symvers (if present)
+        if: always()
+        run: |
+          ls -la configs/ || true
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: PLR110-Display-OC-${{ github.sha }}
+          path: |
+            out/*.ko
+            out/*.zip
+            out/build.log
+          if-no-files-found: warn

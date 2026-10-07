@@ -1,0 +1,6 @@
+id=plr110_display_oc
+name=PLR110 Display Overclock (185Hz)
+version=0.1.0
+versionCode=1
+author=servant1228
+description=OnePlus Ace 6T (PLR110/SM8845) 165Hz → 185Hz 显示超频。运行期注入 LKM，不改 DTBO。当前为 Phase 1 诊断版（只读，不修改时序）。

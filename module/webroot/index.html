@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>PLR110 Display OC</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <h1>PLR110 Display OC</h1>
+  <p class="sub">OnePlus Ace 6T · SM8845 · DSI 超频</p>
+</header>
+
+<section class="card">
+  <h2>状态</h2>
+  <dl id="status">
+    <dt>内核</dt><dd id="st-kernel">…</dd>
+    <dt>模块</dt><dd id="st-module">…</dd>
+    <dt>面板</dt><dd id="st-panel">…</dd>
+    <dt>当前刷新率档位</dt><dd id="st-modes">…</dd>
+  </dl>
+  <button id="refresh" class="ghost">刷新</button>
+</section>
+
+<section class="card">
+  <h2>配置</h2>
+  <label class="row">
+    <span>启用超频</span>
+    <input type="checkbox" id="enable">
+  </label>
+  <label class="row">
+    <span>目标刷新率 (Hz)</span>
+    <input type="number" id="target" min="166" max="200" step="1">
+  </label>
+  <label class="row">
+    <span>记录模式切换日志</span>
+    <input type="checkbox" id="dump">
+  </label>
+  <div class="actions">
+    <button id="save" class="primary">保存并应用</button>
+    <button id="unload" class="danger">卸载模块</button>
+  </div>
+  <p class="hint">保存后需要重新加载内核模块才会生效。</p>
+</section>
+
+<section class="card">
+  <h2>当前 mode 表</h2>
+  <pre id="modes">—</pre>
+</section>
+
+<section class="card">
+  <h2>日志</h2>
+  <pre id="log">—</pre>
+  <button id="clearlog" class="ghost">清空日志</button>
+</section>
+
+<footer>
+  <span id="webui-status">webui</span>
+</footer>
+
+<script src="app.js"></script>
+</body>
+</html>
