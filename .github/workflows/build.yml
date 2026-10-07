@@ -51,11 +51,15 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq bc bison flex libssl-dev libelf-dev \
+            libdw-dev zlib1g-dev dwarves zstd \
             python3 python3-pip zip unzip kmod cpio rsync git curl
+          # libdw-dev provides dwarf.h, required by scripts/gendwarfksyms which
+          # the kernel builds because the device enables CONFIG_EXTENDED_MODVERSIONS
+          test -f /usr/include/dwarf.h && echo "dwarf.h OK"
 
-      - name: Cache toolchain
+      - name: Restore toolchain
         id: cache-clang
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: toolchain/${{ env.CLANG_VERSION }}
           key: ${{ env.CLANG_VERSION }}
@@ -66,23 +70,27 @@ jobs:
           set -e
           mkdir -p toolchain
           cd toolchain
-          for ref in main; do
-            url="https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/${ref}/${CLANG_VERSION}.tar.gz"
-            echo "trying $url"
-            if curl -fsSL -o clang.tar.gz "$url"; then
-              echo "OK from $ref"
-              break
-            fi
-          done
+          url="https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/${CLANG_VERSION}.tar.gz"
+          echo "fetching $url"
+          curl -fsSL -o clang.tar.gz "$url"
           test -s clang.tar.gz || { echo "::error::cannot download $CLANG_VERSION"; exit 1; }
           mkdir -p "$CLANG_VERSION"
           tar -xzf clang.tar.gz -C "$CLANG_VERSION"
           rm -f clang.tar.gz
           "$CLANG_VERSION/bin/clang" --version
 
-      - name: Cache kernel source
+      # saved unconditionally so a later build failure does not throw away the
+      # ~1GB toolchain download
+      - name: Save toolchain
+        if: always() && steps.cache-clang.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: toolchain/${{ env.CLANG_VERSION }}
+          key: ${{ env.CLANG_VERSION }}
+
+      - name: Restore kernel source
         id: cache-kernel
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: ksrc
           key: ksrc-${{ env.KERNEL_REF }}-v2
@@ -96,6 +104,13 @@ jobs:
           git clone --depth 1 --single-branch -b "$KERNEL_REF" \
             "https://github.com/${KERNEL_REPO}.git" ksrc
           du -sh ksrc
+
+      - name: Save kernel source
+        if: always() && steps.cache-kernel.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ksrc
+          key: ksrc-${{ env.KERNEL_REF }}-v2
 
       - name: Build
         run: |
