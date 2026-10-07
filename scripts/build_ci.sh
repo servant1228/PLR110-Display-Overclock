@@ -92,6 +92,21 @@ prepare_tree() {
          defconfig 2>&1 | tee -a "$LOG"
   fi
 
+  # The device config sets
+  #   CONFIG_MODULE_SIG_PROTECT=y
+  #   CONFIG_MODULE_SIG_PROTECT_LIST="protected_module_names_list"
+  # and modpost has that file as a prerequisite. The vendor/OnePlus tree ships
+  # it; the GKI common tree does not, which fails the build with
+  #   No rule to make target '.../protected_module_names_list', needed by modpost
+  # An empty list means "no module is required to be signed", which is what we
+  # want for an unsigned self-built module.
+  prot="$(sed -n 's/^CONFIG_MODULE_SIG_PROTECT_LIST="\(.*\)"$/\1/p' \
+          "$OUT/.config" | head -1)"
+  if [ -n "$prot" ] && [ ! -e "$tree/$prot" ]; then
+    log "creating empty $prot (CONFIG_MODULE_SIG_PROTECT_LIST=$prot)"
+    : > "$tree/$prot"
+  fi
+
   make -C "$tree" O="$OUT" ARCH=arm64 LLVM=1 CC="$CLANG" \
        LD="${CLANG_DIR}/ld.lld" \
        modules_prepare 2>&1 | tee -a "$LOG"
