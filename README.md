@@ -16,11 +16,24 @@ OnePlus Ace 6T (`PLR110`, Qualcomm **SM8845**) 显示刷新率超频项目。
 | --- | --- |
 | 官方内核源码定位 / 版本比对 | ✅ 完成 |
 | 高通 DSI 挂载点分析 | ✅ 完成 |
-| 设备地面真相采集 | ⏳ 待 ADB 授权 |
-| 185Hz timing 可行性验算 | ⏳ 依赖上面 |
-| CI 云端编译链 | 🚧 搭建中 |
-| LKM 实现 | 🚧 骨架 |
-| KernelSU 模块 + WebUI | 🚧 骨架 |
+| 设备地面真相采集 | ✅ 完成（`docs/device-info.md`） |
+| 符号 CRC 提取（1267 条） | ✅ 完成 |
+| CI 云端编译链 | ✅ 打通（冷跑 ~15min，命中缓存 **3m41s**） |
+| LKM 编译 + 真机加载 | ✅ **通过**（`insmod rc=0`，CRC + vermagic + KCFI 全部成立） |
+| 结构体 ABI 校验 | ✅ **通过**（`dsi_mode_info` 头部偏移逐项吻合 DT 实测值） |
+| 185Hz 档位注入 | ⏳ Phase 2 |
+| 185Hz 物理生效验证 | ⏳ Phase 3（CMD 模式面板，风险点） |
+
+### Phase 1 关键证据
+
+```
+$ insmod plr110_display_oc.ko enable=0 dump_modes=1   ->  rc=0
+plr110_display_oc: resolved 15/21 symbols
+plr110_display_oc: set_mode#1: 1272x2800 @120Hz clk=1107000000
+                   hporch=26/26/2 vporch=56/24/2 dsc=1
+```
+
+kprobe 读出的 timing 与设备 live FDT 里的 DT 定义逐项一致。
 
 ---
 

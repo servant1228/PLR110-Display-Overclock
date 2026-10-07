@@ -165,7 +165,84 @@ DSC：`slice 636x20`、`2 encoders`、`8 bpp`、`10 bpc`、`version 18`、`lm-sp
 `struct dsi_mode_info`（`dsi_defs.h:483`）前 22 个字段已镜像到 `src/plr110_display_oc.c`
 用于运行期 ABI 自检。
 
-## 7. 待验证 / 风险
+## 7. ✅ Phase 1 验证结果（真机实测）
+
+CI 云端编译的 `plr110_display_oc.ko` 在设备上：
+
+```
+$ insmod /data/local/tmp/plr110_display_oc.ko enable=0 dump_modes=1
+insmod_rc=0
+$ cat /proc/modules | grep plr110
+plr110_display_oc 12288 0 - Live 0x0000000000000000 (O)
+```
+
+### 7.1 加载成功证明的三件事
+
+1. **CRC 机制成立**：模块只有 7 个导入符号
+   （`__stack_chk_fail` `_printk` `memcpy` `param_ops_int` `param_ops_uint`
+   `register_kprobe` `unregister_kprobe`），全部取自设备真实 `__versions`，
+   `module_layout = 0x797f2b3e` 校验通过。
+2. **vermagic 机制成立**：模块 vermagic 尾部与设备一致；开头版本号被内核忽略。
+3. **KCFI 成立**：`register_kprobe` 注册的 `pre_handler` 被成功回调（见下），
+   说明 `kprobe_pre_handler_t` 的类型哈希与设备内核一致，即 r536225 +
+   `-fsanitize=kcfi` + `CONFIG_CFI_ICALL_NORMALIZE_INTEGERS` 组合正确。
+
+### 7.2 kallsyms 运行期符号解析
+
+```
+kallsyms_lookup_name @ kallsyms_lookup_name+0x0/0xc8
+resolved 15/21 symbols
+  drm_mode_probed_add / drm_mode_duplicate / drm_mode_destroy / drm_mode_vrefresh
+  drm_connector_list_iter_begin/next/end
+  dsi_display_get_modes              [msm_drm]
+  dsi_display_get_modes_helper       [msm_drm]
+  dsi_connector_get_modes            [msm_drm]
+  dsi_display_set_mode               [msm_drm]
+  dsi_panel_calc_dsi_transfer_time   [msm_drm]
+  dsi_display_clk_ctrl               [msm_drm]   <- 时钟控制
+  dsi_panel_tx_cmd_set               [msm_drm]   <- DCS 命令下发
+  dsi_display_bind                   [msm_drm]
+MISSING: dsi_panel_parse_timing, dsi_panel_get_drm_mode, dsi_panel_parse_dt,
+         dsi_display_get, oplus_display_panel_cmd_print, oplus_dsi_panel_cmd_print
+```
+
+MISSING 的都是 static / 被内联 / 17.0.0.100 改过名的函数，不影响主路径。
+
+### 7.3 ⭐ 结构体 ABI 校验（最关键的一步）
+
+kprobe 挂在 `dsi_display_set_mode(display, mode, flags)` 上，读 `mode->timing`：
+
+```
+set_mode#1: 1272x2800 @120Hz clk=1107000000 hporch=26/26/2 vporch=56/24/2 dsc=1
+```
+
+与从设备 live FDT 解出的 DT 定义逐项对比：
+
+| 字段 | kprobe 实测 | DT 定义 | |
+| --- | --- | --- | --- |
+| h_active × v_active | 1272 × 2800 | 1272 × 2800 | ✅ |
+| refresh_rate | 120 | 120 | ✅ |
+| clk_rate_hz | 1107000000 | 1107000000 | ✅ |
+| hfp / hbp / hpw | 26 / 26 / 2 | 26 / 26 / 2 | ✅ |
+| vfp / vbp / vpw | 56 / 24 / 2 | 56 / 24 / 2 | ✅ |
+| dsc_enabled | 1 | dsc | ✅ |
+
+**结论：`struct dsi_mode_info` 头部字段在运行内核上的偏移与镜像完全一致。**
+
+尾部 `mdp_transfer_time_us` / `bpp` / `pixel_clk_khz` 读出来不对
+（实测在镜像 +0 处读到 `bpp=8`），说明真实结构体比 16.0.10.500 头文件
+**小 16 字节**（`sizeof(dsi_mode_info)` 约 88 而非 104）。
+这是预期的源码/固件版本差；我们只用前缀字段，不受影响。
+
+### 7.4 其它观察
+
+- OPPO 有个 `[KERNEL_SECURITY_CHECK]: ko:[plr110_display_oc.ko] hash not found,
+  maybe unknown ko.` —— 只打日志，不拦截。
+- `rmmod` 干净退出，显示链路无异常。
+- 第一版 CI 产生的 `depends=msm_drm,inte,oplus_bsp_zram_opt,msm_kgsl` 是假依赖
+  （CRC 表第三列填了「来源模块」而非「导出模块」），已改为 `vmlinux`。
+
+## 8. 待验证 / 风险
 
 1. 面板是 **command mode**，刷新率主要由 DDIC 决定（ADFR/fps-switch 命令）。
    165 → 185 是否物理可行取决于 DDIC，host timing 不一定能强制。

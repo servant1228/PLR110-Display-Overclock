@@ -100,8 +100,14 @@ def main():
     # "GPL only" failure. Namespaces are left empty; if the module ends up
     # importing a namespaced symbol the kernel will reject it at load time and
     # scripts/build_ci.sh dumps the undefined symbol list so it is visible.
-    for name, (crc, mod) in sorted(seen.items()):
-        print(f"0x{crc:08x}\t{name}\t{mod}\tEXPORT_SYMBOL\t")
+    #
+    # Third column = the module that *exports* the symbol. These CRCs are
+    # harvested from modules that merely *import* them, so they almost all
+    # live in vmlinux. Declaring them as vmlinux avoids modpost inventing a
+    # bogus dependency list (depends=msm_drm,inte,oplus_bsp_zram_opt,msm_kgsl)
+    # that modprobe would then try to enforce.
+    for name, (crc, _mod) in sorted(seen.items()):
+        print(f"0x{crc:08x}\t{name}\tvmlinux\tEXPORT_SYMBOL\t")
 
 
 if __name__ == "__main__":
