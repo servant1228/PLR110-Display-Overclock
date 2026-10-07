@@ -22,6 +22,12 @@ DISPLAY_SRC="${PLR110_DISPLAY_SRC:-}"
 VERMAGIC_FILE="${PLR110_VERMAGIC_FILE:-$ROOT/configs/kernel.release}"
 
 CLANG_DIR="$(cd "$(dirname "$CLANG")" && pwd)"
+# LLVM=1 makes Kbuild drive the whole LLVM toolchain (ld.lld, llvm-ar,
+# llvm-nm, llvm-objcopy, llvm-objdump ...) for target *and* host objects
+# (e.g. tools/bpf/resolve_btfids when CONFIG_DEBUG_INFO_BTF=y). Passing
+# CC/LD alone is not enough -- the bin dir must be on PATH, otherwise the
+# host link step dies with "/bin/sh: 1: ld.lld: not found".
+export PATH="$CLANG_DIR:$PATH"
 mkdir -p "$OUT"
 LOG="$OUT/build.log"
 : > "$LOG"
@@ -31,6 +37,15 @@ log() { echo -e "\n\033[1;36m>>> $*\033[0m" | tee -a "$LOG"; }
 # ---------------------------------------------------------------- sanity ----
 log "toolchain"
 "$CLANG" --version | tee -a "$LOG"
+for t in clang clang++ ld.lld llvm-ar llvm-nm llvm-objcopy llvm-objdump \
+         llvm-strip llvm-readelf; do
+  if command -v "$t" >/dev/null 2>&1; then
+    printf '  %-14s %s\n' "$t" "$(command -v "$t")" | tee -a "$LOG"
+  else
+    echo "::error::$t not found under $CLANG_DIR (required by LLVM=1)" | tee -a "$LOG"
+    exit 1
+  fi
+done
 CVER="$("$CLANG" --version | head -1)"
 case "$CVER" in
   *"19.0.1"*) : ;;
@@ -55,7 +70,7 @@ fi
 
 make_args() {
   echo -C "$1" O="$OUT" ARCH=arm64 LLVM=1 CC="$CLANG" \
-       LD="${CLANG_DIR}/ld.lld" HOSTCC=gcc HOSTCXX=g++
+       LD="${CLANG_DIR}/ld.lld"
 }
 
 # --------------------------------------------------------------- prepare ----
@@ -69,23 +84,23 @@ prepare_tree() {
       *)    cp "$CFG" "$OUT/.config" ;;
     esac
     make -C "$tree" O="$OUT" ARCH=arm64 LLVM=1 CC="$CLANG" \
-         LD="${CLANG_DIR}/ld.lld" HOSTCC=gcc HOSTCXX=g++ \
+         LD="${CLANG_DIR}/ld.lld" \
          olddefconfig 2>&1 | tee -a "$LOG"
   else
     make -C "$tree" O="$OUT" ARCH=arm64 LLVM=1 CC="$CLANG" \
-         LD="${CLANG_DIR}/ld.lld" HOSTCC=gcc HOSTCXX=g++ \
+         LD="${CLANG_DIR}/ld.lld" \
          defconfig 2>&1 | tee -a "$LOG"
   fi
 
   make -C "$tree" O="$OUT" ARCH=arm64 LLVM=1 CC="$CLANG" \
-       LD="${CLANG_DIR}/ld.lld" HOSTCC=gcc HOSTCXX=g++ \
+       LD="${CLANG_DIR}/ld.lld" \
        modules_prepare 2>&1 | tee -a "$LOG"
 }
 
-log "modules_prepare (vendor tree: $KERNEL_SRC)"
+log "modules_prepare ($KERNEL_SRC)"
 if ! prepare_tree "$KERNEL_SRC"; then
   if [ -n "$FALLBACK_KERNEL_SRC" ] && [ -f "$FALLBACK_KERNEL_SRC/Makefile" ]; then
-    log "::warning::vendor tree prepare failed -> falling back to $FALLBACK_KERNEL_SRC"
+    log "::warning::prepare failed -> falling back to $FALLBACK_KERNEL_SRC"
     rm -rf "$OUT"
     mkdir -p "$OUT"
     KERNEL_SRC="$FALLBACK_KERNEL_SRC"
@@ -97,7 +112,7 @@ if ! prepare_tree "$KERNEL_SRC"; then
 fi
 
 COMMON_ARGS=(-C "$KERNEL_SRC" O="$OUT" ARCH=arm64 LLVM=1 CC="$CLANG"
-              LD="${CLANG_DIR}/ld.lld" HOSTCC=gcc HOSTCXX=g++)
+              LD="${CLANG_DIR}/ld.lld")
 
 # ---------------------------------------------------------- kernel.release --
 # The published source (6.12.38) is older than the target device (6.12.69).

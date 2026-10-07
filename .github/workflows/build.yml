@@ -18,6 +18,10 @@ on:
       - "module/**"
       - ".github/workflows/build.yml"
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   CLANG_VERSION: clang-r536225
   # The GKI common kernel is the only *complete* standalone tree.
