@@ -159,10 +159,14 @@ fi
 
 # ---------------------------------------------------------------- module ----
 log "building module against $KERNEL_SRC"
+# NOTE: do *not* also pass KBUILD_EXTRA_SYMBOLS=$OUT/Module.symvers here.
+# modpost already reads $(objtree)/Module.symvers, so adding it again makes
+# every symbol look like a duplicate:
+#   ERROR: modpost: msm_drm: '___ratelimit' exported twice.
+#   Previous export was in msm_drm.ko
 make "${COMMON_ARGS[@]}" \
   M="$SRC" \
   PLR110_DISPLAY_SRC="$DISPLAY_SRC" \
-  KBUILD_EXTRA_SYMBOLS="$OUT/Module.symvers" \
   modules 2>&1 | tee -a "$LOG"
 
 KO="$(find "$SRC" -maxdepth 1 -name '*.ko' | head -1)"
