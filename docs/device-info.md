@@ -323,7 +323,64 @@ clk_rate_hz_new = 1363200000 x 185/165 = 1528538182  (~1.529 GHz)
 （165Hz 用的是 `002c0c0c1d1a0c0c0b0204002411`）。
 这是下一步要解决的核心问题。
 
-## 10. 待验证 / 风险
+## 11. Phase 2b：DRM connector mode 链表（解决了 5 vs 10 的疑团）
+
+用**编译期头文件**算出的偏移（不是我手算的）+ 运行时校验：
+
+```
+sizeof(drm_connector)=2736  name@96  modes@176  probed_modes@200
+drm_connector ffffff882c816000 name="DSI-1" type=16/1 status=1
+  probed_modes: 0 entries                 <- 已被 DRM 移空
+  modes[0] "1272x2800x120cmd" clock=458583kHz vrefresh=119
+  modes[1] "1272x2800x60cmd"  clock=229291kHz vrefresh=59
+  modes[2] "1272x2800x90cmd"  clock=343937kHz vrefresh=89
+  modes[3] "1272x2800x144cmd" clock=550300kHz vrefresh=143
+  modes[4] "1272x2800x165cmd" clock=630552kHz vrefresh=164
+  modes: 5 entries
+```
+
+两个结论：
+
+1. **内核里就是 5 个 mode。** `dumpsys` 里那 10 个（含 1080×2378 组）是
+   OPPO 显示 HAL / SurfaceFlinger 侧加的，与内核无关。
+   ⇒ 不需要“追加到数组尾部”，也不存在数组空位问题。
+2. `clock = 630552 kHz` 正好等于 `1326 × 2882 × 165 / 1000`，
+   **反向验证了 htotal/vtotal 推导正确**。
+
+## 12. mode 数据的完整映射链路（决定注入要改哪些位置）
+
+```c
+dsi_connector_get_modes()
+  dsi_display_get_modes()          -> display->modes[]  (dsi_display_mode, 带 priv_info)
+  dsi_convert_to_drm_mode(&modes[i], &drm_mode)
+  drm_mode_duplicate() -> drm_mode_probed_add(connector, m)   -> connector->modes[]
+
+// 用户态选模式后，DRM 校验：
+dsi_conn_mode_valid()
+  convert_to_dsi_mode(drm_mode, &dsi_mode)     // 只取 h/v 时序 + refresh_rate
+  msm_parse_mode_priv_info(conn_state->msm_mode, &dsi_mode)
+      dsi_mode->priv_info      = msm_mode->private
+      dsi_mode->timing.clk_rate_hz = priv_info->clk_rate_hz   // <- 时钟只从这里来
+  dsi_display_find_mode(display, &dsi_mode, NULL, &full)      // 按 timing 匹配 display->modes[]
+  dsi_display_validate_mode(display, full, ALLOW_ADJUST)
+
+// 真正下到硬件：
+dsi_bridge_pre_enable()
+  dsi_display_set_mode(display, &c_bridge->dsi_mode, 0)   // 按值传入，只带了 timing
+```
+
+关键点：
+
+- `convert_to_dsi_mode()` **只写** h/v 时序和 `refresh_rate`（由 `drm_mode_vrefresh()`
+  即 clock/htotal/vtotal 算出），**不写 `clk_rate_hz`**。
+- `clk_rate_hz` 只来自 `priv_info->clk_rate_hz`，而 `priv_info` 反过来来自
+  `msm_mode->private`（即 SurfaceFlinger 回传的 blob）。
+- 所以要让 185Hz 真生效，必须同时改**三处**：
+  1. `connector->modes[i]`（DRM mode：`clock`，以及让 `vrefresh` 算出 185）
+  2. `display->modes[i].timing`（让 `dsi_display_find_mode()` 能匹配上）
+  3. `display->modes[i].priv_info->clk_rate_hz`（真正的 DSI 时钟）
+
+## 13. 待验证 / 风险
 
 1. 面板是 **command mode**，刷新率主要由 DDIC 决定（ADFR/fps-switch 命令）。
    165 → 185 是否物理可行取决于 DDIC，host timing 不一定能强制。
