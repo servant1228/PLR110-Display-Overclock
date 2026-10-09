@@ -261,15 +261,20 @@ static void find_ptr_in_struct(const char *what, const void *base, size_t bytes,
 {
 	const u64 *q = base;
 	size_t i;
+	int found = 0;
 
 	for (i = 0; i + 8 <= bytes; i += 8) {
 		if (q[i / 8] == (u64)(uintptr_t)needle) {
-			plr110_info("%s: found %px at +%#zx (offsetof = %zu)\n",
+			plr110_info("%s: %px at +%#zx (offsetof = %zu)\n",
 				    what, needle, i, i);
-			return;
+			found++;
 		}
 	}
-	plr110_info("%s: %px not found in first %zu bytes\n", what, needle, bytes);
+	if (!found)
+		plr110_info("%s: %px not found in first %zu bytes\n",
+			    what, needle, bytes);
+	else
+		plr110_info("%s: %d match(es)\n", what, found);
 }
 
 /* ------------------------------------------------------------- mode kprobe */
@@ -277,13 +282,67 @@ static void find_ptr_in_struct(const char *what, const void *base, size_t bytes,
 static struct kprobe kp_set_mode;
 static struct kprobe kp_panel_get_mode;
 static struct kprobe kp_display_get_modes;
+static struct kprobe kp_panel_tx_cmd_set;
 static unsigned long set_mode_calls;
+
+/*
+ * Discovery without touching the mode-enumeration path.
+ *
+ * dsi_connector_get_modes() only runs during DRM probe, i.e. before a
+ * KernelSU module can possibly be loaded, so dsi_panel_get_mode() is not a
+ * usable handle. dsi_panel_tx_cmd_set(panel, type) however is invoked on
+ * every DCS command set (panel on/off, brightness, fps switch ...) and its
+ * first argument is the struct dsi_panel we need.
+ *
+ *   x0 = struct dsi_panel *       (validated by printing ->name, offset 0)
+ *
+ * Then offsetof(struct dsi_display, panel) is found by scanning the
+ * dsi_display we hold from dsi_display_set_mode() for that exact pointer
+ * value. That scan only reads memory belonging to the display struct and
+ * never dereferences a candidate, so it cannot fault.
+ */
+static bool panel_tx_cmd_set_reported;
+
+static int panel_tx_cmd_set_pre(struct kprobe *p, struct pt_regs *regs)
+{
+	void *panel = (void *)regs->regs[0];
+
+	if (!panel)
+		return 0;
+
+	if (!last_panel)
+		last_panel = panel;
+
+	if (scan_structs && !panel_dumped) {
+		panel_dumped = true;
+		plr110_info("dsi_panel_tx_cmd_set: panel=%px type=%lu\n",
+			    panel, (unsigned long)regs->regs[1]);
+		plr110_info("panel->name = \"%s\" (offset 0, validates the object)\n",
+			    *(const char **)panel);
+		scan_u32_rows("struct dsi_panel", panel, 3072, true);
+	}
+
+	if (!panel_tx_cmd_set_reported) {
+		panel_tx_cmd_set_reported = true;
+		plr110_info("panel_tx_cmd_set fired (panel=%px)\n", panel);
+	}
+	return 0;
+}
 
 static int set_mode_pre(struct kprobe *p, struct pt_regs *regs)
 {
 	struct plr110_display_mode *m = (void *)regs->regs[1];
+	void *display = (void *)regs->regs[0];
 
 	set_mode_calls++;
+
+	if (scan_structs && !display_dumped && display && last_panel) {
+		display_dumped = true;
+		plr110_info("set_mode: display=%px panel=%px\n", display, last_panel);
+		find_ptr_in_struct("struct dsi_display", display, 2048, last_panel);
+		scan_u32_rows("struct dsi_panel", last_panel, 3072, true);
+	}
+
 	if (dump_modes && m) {
 		plr110_dump_mode("set_mode", m);
 
@@ -346,7 +405,6 @@ static int display_get_modes_pre(struct kprobe *p, struct pt_regs *regs)
 	}
 	return 0;
 }
-
 static struct kretprobe kr_conn_get_modes;
 
 static int conn_get_modes_ret(struct kretprobe_instance *ri, struct pt_regs *regs)
@@ -378,6 +436,11 @@ static int install_all_probes(void)
 	int ret;
 
 	ret = install_probe(&kp_set_mode, "dsi_display_set_mode", set_mode_pre);
+	if (ret)
+		return ret;
+
+	ret = install_probe(&kp_panel_tx_cmd_set, "dsi_panel_tx_cmd_set",
+			    panel_tx_cmd_set_pre);
 	if (ret)
 		return ret;
 
@@ -437,6 +500,8 @@ static void __exit plr110_exit(void)
 {
 	if (kr_conn_get_modes.kp.addr)
 		unregister_kretprobe(&kr_conn_get_modes);
+	if (kp_panel_tx_cmd_set.addr)
+		unregister_kprobe(&kp_panel_tx_cmd_set);
 	if (kp_display_get_modes.addr)
 		unregister_kprobe(&kp_display_get_modes);
 	if (kp_panel_get_mode.addr)
