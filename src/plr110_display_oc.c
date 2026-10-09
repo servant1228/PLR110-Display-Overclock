@@ -284,8 +284,22 @@ static int set_mode_pre(struct kprobe *p, struct pt_regs *regs)
 	struct plr110_display_mode *m = (void *)regs->regs[1];
 
 	set_mode_calls++;
-	if (dump_modes && m)
+	if (dump_modes && m) {
 		plr110_dump_mode("set_mode", m);
+
+		/* Raw words so the tail of struct dsi_display_mode (pixel_clk_khz,
+		 * mode flags, bpp, mode_idx, priv_info) can be located exactly on
+		 * the running kernel instead of being inferred. First few calls
+		 * only, to keep dmesg readable. */
+		if (set_mode_calls <= 3) {
+			const u32 *w = (const u32 *)m;
+			int i;
+
+			for (i = 0; i < 40; i += 4)
+				plr110_info("  mode+%03x: %08x %08x %08x %08x\n",
+					    i * 4, w[i], w[i + 1], w[i + 2], w[i + 3]);
+		}
+	}
 	return 0;
 }
 
