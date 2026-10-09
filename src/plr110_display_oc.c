@@ -455,18 +455,12 @@ static void scan_priv_info(void *mode_ptr)
 	size_t off, j;
 	void *priv = NULL;
 
-	if (!last_panel || !ptr_is_kernel(last_panel)) {
-		plr110_info("priv scan: no panel yet\n");
-		return;
-	}
-
-	cm = *(void **)((char *)last_panel + PANEL_OFF_CUR_MODE);
 	if (!ptr_is_kernel(cm)) {
-		plr110_info("priv scan: cur_mode %px is not a kernel pointer\n", cm);
+		plr110_info("priv scan: mode %px is not a kernel pointer\n", cm);
 		return;
 	}
 
-	plr110_info("cur_mode=%px  %ux%u @%uHz dsc=%u pxclk=%u flags=%#x "
+	plr110_info("full mode=%px  %ux%u @%uHz dsc=%u pxclk=%u flags=%#x "
 		    "caps=%#x fmt=%#x idx=%u\n", cm,
 		    cm->timing.h_active, cm->timing.v_active,
 		    cm->timing.refresh_rate, cm->timing.dsc_enabled,
