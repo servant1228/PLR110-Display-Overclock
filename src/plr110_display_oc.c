@@ -610,8 +610,7 @@ static int validate_mode_pre(struct kprobe *p, struct pt_regs *regs)
 
 	if (!full_mode_scanned && scan_structs && ptr_is_kernel(mode)) {
 		full_mode_scanned = true;
-		plr110_info("validate_mode: display=%px mode=%px
-",
+		plr110_info("validate_mode: display=%px mode=%px\n",
 			    (void *)regs->regs[0], mode);
 		scan_priv_info(mode);
 	}
