@@ -381,7 +381,7 @@ static int install_all_probes(void)
 		memset(&kr_conn_get_modes, 0, sizeof(kr_conn_get_modes));
 		kr_conn_get_modes.kp.addr =
 			(kprobe_opcode_t *)sym("dsi_connector_get_modes");
-		kr_conn_get_modes.ret_handler = conn_get_modes_ret;
+		kr_conn_get_modes.handler = conn_get_modes_ret;
 		ret = register_kretprobe(&kr_conn_get_modes);
 		if (ret)
 			return ret;
