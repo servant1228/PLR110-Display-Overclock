@@ -242,7 +242,88 @@ set_mode#1: 1272x2800 @120Hz clk=1107000000 hporch=26/26/2 vporch=56/24/2 dsc=1
 - 第一版 CI 产生的 `depends=msm_drm,inte,oplus_bsp_zram_opt,msm_kgsl` 是假依赖
   （CRC 表第三列填了「来源模块」而非「导出模块」），已改为 `vmlinux`。
 
-## 8. 待验证 / 风险
+## 8. Phase 2a 结构体发现（真机实测，只读）
+
+`dsi_connector_get_modes()` 只在 **DRM probe**（开机）时运行，而 KernelSU 模块
+加载得比它晚，所以 `dsi_panel_get_mode()` 抓不到。试过的触发方式全部无效：
+`wm size`、`peak_refresh_rate`、SurfaceFlinger hotplug、熄屏点亮。
+
+改用 `dsi_panel_tx_cmd_set(panel, type)` —— 它每次下发 DCS 命令
+（开关屏、亮度、fps 切换）都会被调用，`x0` 正是 `struct dsi_panel *`。
+
+```
+dsi_panel_tx_cmd_set: panel=ffffff8829a28000 type=0
+panel->name = "AA607 P 7 A0020 dsc cmd mode panel"   (offset 0，确认对象正确)
+```
+
+### 实测偏移
+
+```
+offsetof(struct dsi_display, panel) = 0x108 = 264      (纯值比对，唯一匹配)
+
+struct dsi_panel @0xffffff8829a28000:
+  +05d0: 00000005 00000005 0a32c600 ffffff88
+         ^^^^^^^^ ^^^^^^^^
+         num_timing_nodes = 5   (+0x5d0 = 1488)
+         num_display_modes = 5  (+0x5d4 = 1492)
+```
+
+与源码字段顺序 `struct dsi_display_mode *cur_mode; u32 num_timing_nodes;
+ u32 num_display_modes;` 完全吸合 —— +0x5c8 就是 `cur_mode`（指向
+`display->modes[4]`，与当前 165Hz 档位一致）。
+
+### 结构体尺寸修正（推翻了 Phase 1 的推测）
+
+原始 u32 dump 给出真实布局，比 16.0.10.500 头文件**少 8 字节**：
+
+| 字段 | 实测偏移 |
+| --- | --- |
+| h_active / hbp / hsync / hfp / hskew | 0x00 / 0x04 / 0x08 / 0x0c / 0x10 |
+| v_active / vbp / vsync / vfp | 0x18 / 0x1c / 0x20 / 0x24 |
+| refresh_rate | **0x2c** |
+| clk_rate_hz (u64) | 0x30 |
+| min_dsi_clk_hz (u64) | 0x38 |
+| mdp_transfer_time_us / dsi_transfer_time_us | 0x40 / 0x44 |
+| dsc_enabled / vdc_enabled | 0x48 / 0x49 |
+| dsc / vdc 指针 | 0x50 / 0x58 |
+
+⇒ `sizeof(struct dsi_mode_info)` = **0x60 = 96**（不是我第一次算的 88/104）。
+
+另一个重要发现：`0x60` 之后全是 0，且 `priv_info` 是 NULL。
+因为 `dsi_bridge_pre_enable()` 传的是桥里**按值存的 `c_bridge->dsi_mode`**，
+只有 timing 被填；真正带 `priv_info` 的完整 mode 由 `dsi_display_set_mode()`
+内部通过 `dsi_display_find_mode()` 找回。
+**这对注入是好消息：只需要改已验证的 `timing` 前缀。**
+
+## 9. ⛔ 185Hz 的硬约束（算出来的，不是猜的）
+
+165Hz 档位实测：`clk_rate_hz = 1363200000`，porch 为
+hfp/hbp/hsync = 26/26/2、vfp/vbp/vsync = 56/24/2。
+
+```
+htotal = 1272 + 26 + 2 + 26        = 1326
+vtotal = 2800 + 56 + 24 + 2        = 2882
+空白行只有 82 行 / 2882 = 2.8%
+```
+
+想靠**压缩空白区**把 165 → 185Hz（需 +12.1%）：
+
+```
+vtotal_new = 2882 x 165/185 = 2570.6  <  v_active 2800
+vfp_new    = 2570.6 - 2800 - 24 - 2 = -255    ← 负数，不可能
+```
+
+⇒ **没门。** 面板的空白区已经压到极限，唯一出路是**提高 DSI 时钟**：
+
+```
+clk_rate_hz_new = 1363200000 x 185/165 = 1528538182  (~1.529 GHz)
+```
+
+而 PHY 需要一条对应的 `qcom,mdss-dsi-panel-phy-timings` 参数表项
+（165Hz 用的是 `002c0c0c1d1a0c0c0b0204002411`）。
+这是下一步要解决的核心问题。
+
+## 10. 待验证 / 风险
 
 1. 面板是 **command mode**，刷新率主要由 DDIC 决定（ADFR/fps-switch 命令）。
    165 → 185 是否物理可行取决于 DDIC，host timing 不一定能强制。

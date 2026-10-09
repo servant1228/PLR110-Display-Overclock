@@ -277,6 +277,26 @@ static void find_ptr_in_struct(const char *what, const void *base, size_t bytes,
 		plr110_info("%s: %d match(es)\n", what, found);
 }
 
+/* ------------------------------------------- measured struct offsets (2a) */
+/*
+ * Measured on the running 6.12.69 kernel, not derived from the 16.0.10.500
+ * source tree - see docs/device-info.md section 8 for the raw dump.
+ *
+ *   offsetof(struct dsi_display, panel)      = 0x108 (264)
+ *   offsetof(struct dsi_panel, cur_mode)     = 0x5c8 (1480)
+ *   offsetof(struct dsi_panel, num_timing_nodes)  = 0x5d0 (1488)
+ *   offsetof(struct dsi_panel, num_display_modes) = 0x5d4 (1492)
+ *
+ * Identified by printing panel->name (validates the object) and looking for
+ * the two adjacent u32 counters that follow the cur_mode pointer.
+ * Nothing writes to these yet; they are recorded here so the next revision
+ * can validate them again at runtime before ever storing anything.
+ */
+#define DISPLAY_OFF_PANEL		0x108
+#define PANEL_OFF_CUR_MODE		0x5c8
+#define PANEL_OFF_NUM_TIMING_NODES	0x5d0
+#define PANEL_OFF_NUM_DISPLAY_MODES	0x5d4
+
 /* ------------------------------------------------------------- mode kprobe */
 
 static struct kprobe kp_set_mode;
