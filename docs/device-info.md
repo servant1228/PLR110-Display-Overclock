@@ -380,7 +380,78 @@ dsi_bridge_pre_enable()
   2. `display->modes[i].timing`（让 `dsi_display_find_mode()` 能匹配上）
   3. `display->modes[i].priv_info->clk_rate_hz`（真正的 DSI 时钟）
 
-## 13. 待验证 / 风险
+## 14. PHY timing 参数：这是最后一个卡点
+
+### 为什么需要新参数
+
+`dsi_phy_set_timing_params()` 在**换模式**和**换时钟**两条路径上都被调用，
+而且用的都是 DT 里的 `phy_timing_val`：
+
+```c
+dsi_display.c:5715   mode set 路径        -> dsi_phy_set_timing_params(phy, priv_info->phy_timing_val, ...)
+dsi_display.c:9735   时钟变更路径（同一份 DT 表）
+```
+
+所以只改 `clk_rate_hz` 会留下一张与时钟不匹配的 PHY 表，链路会出问题。
+
+### 这 14 个字到底是什么
+
+```c
+int dsi_phy_hw_timing_val_v7_2(struct dsi_phy_per_lane_cfgs *timing_cfg,
+			       u32 *timing_val, u32 size)
+{
+	if (size != DSI_PHY_TIMING_V4_SIZE)   /* 14 */
+		return -EINVAL;
+	for (i = 0; i < size; i++)
+		timing_cfg->lane_v4[i] = timing_val[i];
+}
+```
+
+且 `lane_v4[0..13]` 被直接写进 `DSIPHY_CMN_TIMING_CTRL_0..13` 寄存器。
+⇒ **这 14 个字节是预设好的原始寄存器值**，不是可推导的中间量，
+只在它被设计的那一个 bit clock 下有效。
+
+```
+1107 MHz -> 00 24 0a 0a 1a 18 0a 0a 09 02 04 00 1e 0f
+1363.2MHz -> 00 2c 0c 0c 1d 1a 0c 0c 0b 02 04 00 24 11
+```
+
+### 但是可以自己算出来
+
+`msm/dsi/dsi_phy_timing_calc.c` 里有完整公式，输入是 bit clock 和 PHY 参数：
+
+```
+calc_clk_prepare()  calc_clk_zero()   calc_clk_trail()
+calc_hs_prepare()   calc_hs_zero()    calc_hs_trail()
+calc_hs_rqst()      calc_hs_exit()    calc_clk_post()   calc_clk_pre()
+```
+
+输入量（`tlpx_numer_ns`、`hs_prep_buf` 等）全部来自 DT 的 `mdss_dsi_phy0` 节点，
+已可从 live FDT 读到。
+
+### 可行性验证方法（重要）
+
+在 Python 里复现这套公式，**先用 1363.2 MHz 跑一遍，看能否得到
+`002c0c0c1d1a0c0c0b0204002411`**。
+
+- 能对上 ⇒ 公式复现正确，可以用同样的代码算 1528.5 MHz 的参数，可信。
+- 对不上 ⇒ 说明有遗漏的输入，停下重新分析。
+
+这是一个自带校验的路径，不靠猜。
+
+## 15. 注入需要同时改的四处
+
+| # | 位置 | 内容 | 已验证? |
+| --- | --- | --- | --- |
+| 1 | `connector->modes[4]` (DRM mode) | `clock` = `htotal*vtotal*fps/1000` | 偏移是编译器给的 ✅ |
+| 2 | `display->modes[4].timing` | `refresh_rate`、`clk_rate_hz` | 前缀逐个字段对比过 DT ✅ |
+| 3 | `display->modes[4].priv_info->clk_rate_hz` | 真正的 DSI 时钟 | 偏移待测 ⏳ |
+| 4 | `display->modes[4].priv_info->phy_timing_val` | 新速率对应的 14 字节 PHY 表 | 偏移待测 ⏳ |
+
+第 3/4 项需要再测一次 `struct dsi_display_mode_priv_info` 的偏移
+（可以在 kprobe 里拿 `priv_info` 指针后扫内存，方式和 2a 一样）。
+
+## 16. 待验证 / 风险
 
 1. 面板是 **command mode**，刷新率主要由 DDIC 决定（ADFR/fps-switch 命令）。
    165 → 185 是否物理可行取决于 DDIC，host timing 不一定能强制。
