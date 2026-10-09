@@ -469,7 +469,33 @@ static void scan_priv_info(void *mode_ptr)
 
 	scan_words("struct dsi_display_mode (full, from validate_mode)", cm, 0x100, false);
 
-	/* Walk every kernel pointer in the mode and look for the phy table. */
+	/*
+	 * REMOVED: following every kernel-pointer-looking u64 in the mode and
+	 * reading up to 16 KB from each target. That is what crashed the phone.
+	 *
+	 * Android runs with panic_on_oops=1, so a single kernel page fault is a
+	 * full panic and reboot - there is no graceful failure. A raw pointer
+	 * taken from an offset we are not certain about is not a valid object,
+	 * and blind-reading past it faults immediately.
+	 *
+	 * Any future version of this probe must either
+	 *   - use copy_from_kernel_nofault()/probe_kernel_read() so a bad address
+	 *     returns an error instead of oopsing, or
+	 *   - only dereference pointers whose target has already been positively
+	 *     identified, and never read more than the object's real size.
+	 * Until one of those is in place, nothing here follows a pointer.
+	 */
+	plr110_info("priv scan: pointer walking disabled (unsafe without "
+		    "nofault reads; see source comment)\n");
+}
+
+#if 0  /* kept for reference, do not enable as-is */
+static void scan_priv_info_unsafe_tail(void *mode_ptr)
+{
+	struct plr110_display_mode *cm = mode_ptr;
+	size_t off, j;
+	void *priv = NULL;
+
 	for (off = 0; off + 8 <= 0x100; off += 8) {
 		void *p = *(void **)((char *)cm + off);
 		bool hit;
@@ -503,6 +529,7 @@ static void scan_priv_info(void *mode_ptr)
 			plr110_info("  priv+%#zx = 14 (phy_timing_len?)\n", j);
 	}
 }
+#endif /* 0 - unsafe pointer walking, see the comment above */
 
 /* ------------------------------------------------------------- mode kprobe */
 
