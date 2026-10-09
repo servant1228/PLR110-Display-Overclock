@@ -39,6 +39,7 @@
 #include <linux/string.h>
 #include <linux/kernel.h>
 #include <linux/utsname.h>
+#include <linux/uaccess.h>
 #include <drm/drm_connector.h>
 #include <drm/drm_modes.h>
 
@@ -531,6 +532,91 @@ static void scan_priv_info_unsafe_tail(void *mode_ptr)
 }
 #endif /* 0 - unsafe pointer walking, see the comment above */
 
+/* ------------------------------------------------------- fault-safe reads */
+/*
+ * The phone runs with /proc/sys/kernel/panic_on_oops = 1, so a single kernel
+ * page fault is a full panic and reboot - there is no error return to catch.
+ * Any probe that follows a pointer it has not positively identified MUST go
+ * through copy_from_kernel_nofault() so a wrong address becomes -EFAULT.
+ *
+ * Declaring the pointer with typeof(&copy_from_kernel_nofault) rather than a
+ * hand-written typedef means the function type - and therefore the KCFI type
+ * hash the compiler embeds at the indirect call site - comes from the kernel's
+ * own declaration in include/linux/uaccess.h:
+ *
+ *     long copy_from_kernel_nofault(void *dst, const void *src, size_t size);
+ *
+ * A hand-written typedef that differs by even one type would fail the CFI
+ * check at call time, which is another panic. Using typeof removes that risk
+ * entirely.
+ */
+static typeof(&copy_from_kernel_nofault) plr_nofault_read;
+static typeof(&copy_to_kernel_nofault)   plr_nofault_write;
+static bool nofault_ok;
+
+static int resolve_nofault(void)
+{
+	unsigned long a = kln ? kln("copy_from_kernel_nofault") : 0;
+	unsigned long b = kln ? kln("copy_to_kernel_nofault") : 0;
+
+	if (!a) {
+		plr110_err("copy_from_kernel_nofault not found - refusing to "
+			   "follow any pointer\n");
+		return -ENOENT;
+	}
+	plr_nofault_read = (void *)a;
+	plr_nofault_write = (void *)b;
+	plr110_info("nofault read @ %px, write @ %px\n", (void *)a, (void *)b);
+	return 0;
+}
+
+/*
+ * Prove the primitive really is fault-safe before anything relies on it:
+ *   - a read of a known-good address must succeed
+ *   - a read of a known-bad address must return an error, not panic
+ * If the second one panics then the KCFI type or the resolution is wrong and
+ * the rest of the module must not run; if it returns an error we are free to
+ * probe safely.
+ */
+static int nofault_self_test(void *known_object)
+{
+	char buf[64];
+	const char *name;
+	long rc;
+
+	if (!plr_nofault_read)
+		return -ENOENT;
+
+	name = *(const char **)known_object;
+	memset(buf, 0, sizeof(buf));
+	rc = plr_nofault_read(buf, name, 40);
+	if (rc) {
+		plr110_err("self-test: good read failed rc=%ld\n", rc);
+		return rc;
+	}
+	buf[39] = '\0';
+	plr110_info("self-test: good read OK \"%s\"\n", buf);
+
+	rc = plr_nofault_read(buf, (const void *)0xdead000000000000UL, 40);
+	if (rc >= 0) {
+		plr110_err("self-test: bad read (non-canonical) succeeded?!\n");
+		return -EIO;
+	}
+	plr110_info("self-test: non-canonical address refused rc=%ld\n", rc);
+
+	rc = plr_nofault_read(buf, (const void *)0xffffff7f00000000UL, 40);
+	if (rc >= 0)
+		plr110_info("self-test: unmapped kernel-range read succeeded "
+			    "(address happens to be mapped)\n");
+	else
+		plr110_info("self-test: unmapped kernel-range address refused "
+			    "rc=%ld\n", rc);
+
+	nofault_ok = true;
+	plr110_info("self-test: PASSED - fault-safe reads available\n");
+	return 0;
+}
+
 /* ------------------------------------------------------------- mode kprobe */
 
 static struct kprobe kp_set_mode;
@@ -576,6 +662,9 @@ static int panel_tx_cmd_set_pre(struct kprobe *p, struct pt_regs *regs)
 		plr110_info("panel->name = \"%s\" (offset 0, validates the object)\n",
 			    *(const char **)panel);
 		scan_u32_rows("struct dsi_panel", panel, 3072, true);
+
+		if (!nofault_ok)
+			nofault_self_test(panel);
 	}
 
 	if (!panel_tx_cmd_set_reported) {
@@ -761,6 +850,10 @@ static int __init plr110_init(void)
 	ret = resolve_kallsyms_lookup_name();
 	if (ret)
 		return ret;
+
+	ret = resolve_nofault();
+	if (ret)
+		plr110_err("continuing without fault-safe reads (diagnostic only)\n");
 
 	plr110_info("resolving target symbols:");
 	resolve_targets();
