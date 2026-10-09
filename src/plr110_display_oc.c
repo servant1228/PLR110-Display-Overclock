@@ -421,6 +421,18 @@ static const u8 plr165_phy[14] = {
 	0x00, 0x2c, 0x0c, 0x0c, 0x1d, 0x1a, 0x0c, 0x0c,
 	0x0b, 0x02, 0x04, 0x00, 0x24, 0x11
 };
+/* the 1107 MHz table, used by the 60/90/120 Hz timings */
+static const u8 plr1107_phy[14] = {
+	0x00, 0x24, 0x0a, 0x0a, 0x1a, 0x18, 0x0a, 0x0a,
+	0x09, 0x02, 0x04, 0x00, 0x1e, 0x0f
+};
+
+/*
+ * Whichever timing the driver happens to be validating, its priv_info holds
+ * one of the two DT vectors. Searching only for the 165 Hz one fails when the
+ * validated mode is 60 Hz - which is exactly what happened the first time.
+ */
+
 #define PLR165_CLK_RATE_HZ 1363200000ULL
 
 static bool mem_has(const void *hay, size_t len, const u8 *needle, size_t nlen)
@@ -573,6 +585,12 @@ static bool safe_has(const void *addr, size_t len, const u8 *needle, size_t nlen
 		off += chunk - (nlen - 1);
 	}
 	return false;
+}
+
+static bool has_any_phy_table(const void *addr, size_t len)
+{
+	return safe_has(addr, len, plr165_phy, sizeof(plr165_phy)) ||
+	       safe_has(addr, len, plr1107_phy, sizeof(plr1107_phy));
 }
 
 static void scan_priv_info(void *mode_ptr)
