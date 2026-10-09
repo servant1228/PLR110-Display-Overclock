@@ -449,9 +449,9 @@ static void scan_words(const char *what, const void *base, size_t bytes,
 	}
 }
 
-static void scan_priv_info(void)
+static void scan_priv_info(void *mode_ptr)
 {
-	struct plr110_display_mode *cm;
+	struct plr110_display_mode *cm = mode_ptr;
 	size_t off, j;
 	void *priv = NULL;
 
@@ -473,17 +473,17 @@ static void scan_priv_info(void)
 		    cm->pixel_clk_khz, cm->dsi_mode_flags, cm->panel_mode_caps,
 		    cm->pixel_format_caps, cm->mode_idx);
 
-	scan_words("struct dsi_display_mode (panel->cur_mode)", cm, 0xc0, false);
+	scan_words("struct dsi_display_mode (full, from validate_mode)", cm, 0x100, false);
 
 	/* Walk every kernel pointer in the mode and look for the phy table. */
-	for (off = 0; off + 8 <= 0xc0; off += 8) {
+	for (off = 0; off + 8 <= 0x100; off += 8) {
 		void *p = *(void **)((char *)cm + off);
 		bool hit;
 
 		if (!ptr_is_kernel(p))
 			continue;
 
-		hit = mem_has(p, 0x800, plr165_phy, sizeof(plr165_phy));
+		hit = mem_has(p, 0x4000, plr165_phy, sizeof(plr165_phy));
 		plr110_info("  mode+%#04zx -> %px  %08x %08x %08x %08x  phy165=%s\n",
 			    off, p, ((u32 *)p)[0], ((u32 *)p)[1],
 			    ((u32 *)p)[2], ((u32 *)p)[3], hit ? "FOUND" : "-");
@@ -497,7 +497,7 @@ static void scan_priv_info(void)
 	}
 
 	plr110_info("priv_info=%px - locating fields\n", priv);
-	for (j = 0; j + 8 <= 0x1000; j += 8) {
+	for (j = 0; j + 8 <= 0x4000; j += 8) {
 		void *q = *(void **)((char *)priv + j);
 		u64 v = *(u64 *)((char *)priv + j);
 
@@ -516,6 +516,8 @@ static struct kprobe kp_set_mode;
 static struct kprobe kp_panel_get_mode;
 static struct kprobe kp_display_get_modes;
 static struct kprobe kp_panel_tx_cmd_set;
+static struct kprobe kp_validate_mode;
+static bool full_mode_scanned;
 static unsigned long set_mode_calls;
 
 /*
@@ -574,7 +576,6 @@ static int set_mode_pre(struct kprobe *p, struct pt_regs *regs)
 		plr110_info("set_mode: display=%px panel=%px\n", display, last_panel);
 		find_ptr_in_struct("struct dsi_display", display, 2048, last_panel);
 		dump_drm_connector(display);
-		scan_priv_info();
 	}
 
 	if (dump_modes && m) {
@@ -592,6 +593,27 @@ static int set_mode_pre(struct kprobe *p, struct pt_regs *regs)
 				plr110_info("  mode+%03x: %08x %08x %08x %08x\n",
 					    i * 4, w[i], w[i + 1], w[i + 2], w[i + 3]);
 		}
+	}
+	return 0;
+}
+
+/*
+ * dsi_display_validate_mode(display, mode, flags) is called from
+ * dsi_conn_mode_valid() with the mode that dsi_display_find_mode() returned,
+ * i.e. a real display->modes[] entry with a fully populated priv_info - unlike
+ * the dsi_display_set_mode() argument (the by-value bridge copy) and unlike
+ * panel->cur_mode, which we measured to be that same bridge copy.
+ */
+static int validate_mode_pre(struct kprobe *p, struct pt_regs *regs)
+{
+	void *mode = (void *)regs->regs[1];
+
+	if (!full_mode_scanned && scan_structs && ptr_is_kernel(mode)) {
+		full_mode_scanned = true;
+		plr110_info("validate_mode: display=%px mode=%px
+",
+			    (void *)regs->regs[0], mode);
+		scan_priv_info(mode);
 	}
 	return 0;
 }
@@ -678,6 +700,11 @@ static int install_all_probes(void)
 	if (ret)
 		return ret;
 
+	ret = install_probe(&kp_validate_mode, "dsi_display_validate_mode",
+			    validate_mode_pre);
+	if (ret)
+		return ret;
+
 	ret = install_probe(&kp_panel_get_mode, "dsi_panel_get_mode",
 			    panel_get_mode_pre);
 	if (ret)
@@ -734,6 +761,8 @@ static void __exit plr110_exit(void)
 {
 	if (kr_conn_get_modes.kp.addr)
 		unregister_kretprobe(&kr_conn_get_modes);
+	if (kp_validate_mode.addr)
+		unregister_kprobe(&kp_validate_mode);
 	if (kp_panel_tx_cmd_set.addr)
 		unregister_kprobe(&kp_panel_tx_cmd_set);
 	if (kp_display_get_modes.addr)
