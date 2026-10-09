@@ -783,12 +783,20 @@ static int validate_mode_pre(struct kprobe *p, struct pt_regs *regs)
 {
 	void *mode = (void *)regs->regs[1];
 
-	if (!full_mode_scanned && scan_structs && ptr_is_kernel(mode)) {
-		full_mode_scanned = true;
-		plr110_info("validate_mode: display=%px mode=%px\n",
-			    (void *)regs->regs[0], mode);
-		scan_priv_info(mode);
-	}
+	/*
+	 * Deliberately wait for the nofault self-test to have run: this probe
+	 * fires before dsi_panel_tx_cmd_set() (which is where the self-test
+	 * happens), and on the first pass nofault_ok is still false. Firing once
+	 * too early must not burn the single scan we get.
+	 */
+	if (!scan_structs || !nofault_ok || full_mode_scanned ||
+	    !ptr_is_kernel(mode))
+		return 0;
+
+	full_mode_scanned = true;
+	plr110_info("validate_mode: display=%px mode=%px\n",
+		    (void *)regs->regs[0], mode);
+	scan_priv_info(mode);
 	return 0;
 }
 
