@@ -39,6 +39,8 @@
 #include <linux/string.h>
 #include <linux/kernel.h>
 #include <linux/utsname.h>
+#include <drm/drm_connector.h>
+#include <drm/drm_modes.h>
 
 #define PLR110_TAG "plr110_display_oc"
 
@@ -293,9 +295,104 @@ static void find_ptr_in_struct(const char *what, const void *base, size_t bytes,
  * can validate them again at runtime before ever storing anything.
  */
 #define DISPLAY_OFF_PANEL		0x108
+#define DISPLAY_OFF_DRM_CONN		0x10
 #define PANEL_OFF_CUR_MODE		0x5c8
 #define PANEL_OFF_NUM_TIMING_NODES	0x5d0
 #define PANEL_OFF_NUM_DISPLAY_MODES	0x5d4
+
+/* ------------------------------------------------- DRM connector modes */
+
+static bool str_looks_valid(const char *s, size_t max)
+{
+	size_t i;
+
+	if (!s)
+		return false;
+	for (i = 0; i < max; i++) {
+		unsigned char c = (unsigned char)s[i];
+
+		if (c == '\0')
+			return i > 0;
+		if (c < 0x20 || c > 0x7e)
+			return false;
+	}
+	return false;
+}
+
+static bool ptr_is_kernel(const void *p)
+{
+	u64 v = (u64)(uintptr_t)p;
+
+	return v >= 0xffff000000000000ULL;
+}
+
+static u32 mode_vrefresh(const struct drm_display_mode *m)
+{
+	u32 htotal = m->htotal ? m->htotal : (m->hdisplay + m->hsync_end - m->hsync_start);
+	u32 vtotal = m->vtotal ? m->vtotal : (m->vdisplay + m->vsync_end - m->vsync_start);
+
+	if (!htotal || !vtotal)
+		return 0;
+	return (u32)(((u64)m->clock * 1000ULL) / ((u64)htotal * vtotal));
+}
+
+static void dump_one_mode_list(const char *which, struct list_head *head)
+{
+	struct drm_display_mode *m;
+	int n = 0;
+
+	list_for_each_entry(m, head, head) {
+		if (!ptr_is_kernel(m) || !str_looks_valid(m->name, 32)) {
+			plr110_info("  %s[%d]: bogus entry %px, stopping\n", which, n, m);
+			return;
+		}
+		plr110_info("  %s[%d] \"%s\" clock=%dkHz %dx%d vrefresh=%u type=%#x\n",
+			    which, n, m->name, m->clock, m->hdisplay, m->vdisplay,
+			    mode_vrefresh(m), m->type);
+		if (++n >= 32) {
+			plr110_info("  %s: truncated at 32\n", which);
+			return;
+		}
+	}
+	plr110_info("  %s: %d entries\n", which, n);
+}
+
+static void dump_drm_connector(void *display)
+{
+	struct drm_connector *c = *(struct drm_connector **)
+		((char *)display + DISPLAY_OFF_DRM_CONN);
+
+	plr110_info("compile-time offsets: sizeof(drm_connector)=%zu "
+		    "name@%zu modes@%zu probed_modes@%zu | "
+		    "sizeof(drm_display_mode)=%zu clock@%zu hdisplay@%zu "
+		    "vdisplay@%zu head@%zu\n",
+		    sizeof(struct drm_connector),
+		    offsetof(struct drm_connector, name),
+		    offsetof(struct drm_connector, modes),
+		    offsetof(struct drm_connector, probed_modes),
+		    sizeof(struct drm_display_mode),
+		    offsetof(struct drm_display_mode, clock),
+		    offsetof(struct drm_display_mode, hdisplay),
+		    offsetof(struct drm_display_mode, vdisplay),
+		    offsetof(struct drm_display_mode, head));
+
+	if (!ptr_is_kernel(c)) {
+		plr110_info("display+%#x = %px is not a kernel pointer\n",
+			    DISPLAY_OFF_DRM_CONN, c);
+		return;
+	}
+	if (!str_looks_valid(c->name, 64)) {
+		plr110_info("connector %px name is not a plausible string; "
+			    "struct layout mismatch, not walking lists\n", c);
+		return;
+	}
+
+	plr110_info("drm_connector %px name=\"%s\" type=%d/%d status=%d\n",
+		    c, c->name, c->connector_type, c->connector_type_id,
+		    c->status);
+	dump_one_mode_list("probed_modes", &c->probed_modes);
+	dump_one_mode_list("modes", &c->modes);
+}
 
 /* ------------------------------------------------------------- mode kprobe */
 
@@ -361,6 +458,7 @@ static int set_mode_pre(struct kprobe *p, struct pt_regs *regs)
 		plr110_info("set_mode: display=%px panel=%px\n", display, last_panel);
 		find_ptr_in_struct("struct dsi_display", display, 2048, last_panel);
 		scan_u32_rows("struct dsi_panel", last_panel, 3072, true);
+		dump_drm_connector(display);
 	}
 
 	if (dump_modes && m) {
