@@ -439,6 +439,57 @@ calc_hs_rqst()      calc_hs_exit()    calc_clk_post()   calc_clk_pre()
 
 这是一个自带校验的路径，不靠猜。
 
+### 输入量全部是硬编码常数（不是 DT）
+
+`dsi_phy_hw_calculate_timing_params()` 开头就是：
+
+```c
+int dsi_phy_hw_calculate_timing_params(struct dsi_phy_hw *phy,
+				       struct dsi_mode_info *mode,
+				       struct dsi_host_common_cfg *host,
+				       struct dsi_phy_per_lane_cfgs *timing,
+				       bool use_mode_bit_clk)
+{
+	u32 const esc_clk_mhz = 192;
+	u32 const esc_clk_mmss_cc_prediv = 10;
+	u32 const tlpx_numer = 1000;
+	u32 const tr_eot = 20;
+	u32 const clk_prepare_spec_min = 38;
+	u32 const clk_prepare_spec_max = 95;
+	u32 const clk_trail_spec_min = 60;
+	u32 const hs_exit_spec_min = 100;
+	u32 const hs_exit_reco_max = 255;
+	u32 const hs_rqst_spec_min = 50;
+	u32 const hs_rqst_reco_max = 255;
+
+	bpp = bits_per_pixel[host->dst_format];
+	inter_num = bpp * mode->refresh_rate;
+	num_of_lanes = popcount(host->data_lanes);
+
+	if (use_mode_bit_clk)
+		x = mode->clk_rate_hz;
+	else
+		x = h_total * v_total * refresh_rate * bpp / lanes;
+	...
+	clk_params.tlpx_numer_ns = tlpx_numer;
+	... -> calc_clk_prepare() ... -> timing->lane_v4[]
+}
+```
+
+⇒ **没有一个输入来自 DT**（PHY 节点里只有 `qcom,platform-lane-config`
+和 `qcom,platform-strength-ctrl`，与这 14 个字节无关）。
+⇒ 可以在 Python 里逐行复现，离线算出任意 bit clock 对应的 14 字节。
+
+### 自带校验的三个已知向量
+
+| bit clock | phy-timings | 来源 |
+| --- | --- | --- |
+| 1107.0 MHz | `00240a0a1a180a0a090204001e0f` | 60/90/120Hz 档位 |
+| 1363.2 MHz | `002c0c0c1d1a0c0c0b0204002411` | 144/165Hz 档位 |
+| **1528.5 MHz** | **待算**（目标） | 185Hz |
+
+复现公式后能同时对上前两个，第三个就可以信任。
+
 ## 15. 注入需要同时改的四处
 
 | # | 位置 | 内容 | 已验证? |
