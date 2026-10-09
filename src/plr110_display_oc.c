@@ -394,6 +394,122 @@ static void dump_drm_connector(void *display)
 	dump_one_mode_list("modes", &c->modes);
 }
 
+/* ------------------------------------------------- priv_info discovery */
+/*
+ * struct dsi_display_mode_priv_info (msm/dsi/dsi_defs.h:715) starts with
+ *
+ *     struct dsi_panel_cmd_set cmd_sets[DSI_CMD_SET_MAX];
+ *     u32 *phy_timing_val;
+ *     u32 phy_timing_len;
+ *     ...
+ *     u64 clk_rate_hz;
+ *
+ * so the two fields an 185Hz injection needs are behind a variable-length
+ * array and cannot be hardcoded from the header. Instead we anchor on two
+ * values that are unique to the running panel:
+ *
+ *   phy_timing_val points at a 14-byte buffer holding exactly the 1363.2 MHz
+ *   vector from the device tree - an unmistakable fingerprint
+ *   clk_rate_hz == 1363200000
+ *
+ * panel->cur_mode (+0x5c8) is a real entry of display->modes[], so unlike the
+ * dsi_display_set_mode() argument (which is the by-value bridge copy with
+ * priv_info == NULL) it carries a fully populated priv_info.
+ */
+static const u8 plr165_phy[14] = {
+	0x00, 0x2c, 0x0c, 0x0c, 0x1d, 0x1a, 0x0c, 0x0c,
+	0x0b, 0x02, 0x04, 0x00, 0x24, 0x11
+};
+#define PLR165_CLK_RATE_HZ 1363200000ULL
+
+static bool mem_has(const void *hay, size_t len, const u8 *needle, size_t nlen)
+{
+	const u8 *b = hay;
+	size_t i;
+
+	for (i = 0; i + nlen <= len; i++)
+		if (!memcmp(b + i, needle, nlen))
+			return true;
+	return false;
+}
+
+
+static void scan_words(const char *what, const void *base, size_t bytes,
+		       bool only_interesting)
+{
+	const u32 *w = base;
+	size_t i;
+
+	plr110_info("%s @%px (%zu bytes)\n", what, base, bytes);
+	for (i = 0; i + 16 <= bytes; i += 16) {
+		if (only_interesting && !row_is_interesting(&w[i / 4]))
+			continue;
+		plr110_info("  +%04zx: %08x %08x %08x %08x\n", i,
+			    w[i / 4], w[i / 4 + 1], w[i / 4 + 2], w[i / 4 + 3]);
+	}
+}
+
+static void scan_priv_info(void)
+{
+	struct plr110_display_mode *cm;
+	size_t off, j;
+	void *priv = NULL;
+
+	if (!last_panel || !ptr_is_kernel(last_panel)) {
+		plr110_info("priv scan: no panel yet\n");
+		return;
+	}
+
+	cm = *(void **)((char *)last_panel + PANEL_OFF_CUR_MODE);
+	if (!ptr_is_kernel(cm)) {
+		plr110_info("priv scan: cur_mode %px is not a kernel pointer\n", cm);
+		return;
+	}
+
+	plr110_info("cur_mode=%px  %ux%u @%uHz dsc=%u pxclk=%u flags=%#x "
+		    "caps=%#x fmt=%#x idx=%u\n", cm,
+		    cm->timing.h_active, cm->timing.v_active,
+		    cm->timing.refresh_rate, cm->timing.dsc_enabled,
+		    cm->pixel_clk_khz, cm->dsi_mode_flags, cm->panel_mode_caps,
+		    cm->pixel_format_caps, cm->mode_idx);
+
+	scan_words("struct dsi_display_mode (panel->cur_mode)", cm, 0xc0, false);
+
+	/* Walk every kernel pointer in the mode and look for the phy table. */
+	for (off = 0; off + 8 <= 0xc0; off += 8) {
+		void *p = *(void **)((char *)cm + off);
+		bool hit;
+
+		if (!ptr_is_kernel(p))
+			continue;
+
+		hit = mem_has(p, 0x800, plr165_phy, sizeof(plr165_phy));
+		plr110_info("  mode+%#04zx -> %px  %08x %08x %08x %08x  phy165=%s\n",
+			    off, p, ((u32 *)p)[0], ((u32 *)p)[1],
+			    ((u32 *)p)[2], ((u32 *)p)[3], hit ? "FOUND" : "-");
+		if (hit)
+			priv = p;
+	}
+
+	if (!priv) {
+		plr110_info("priv scan: priv_info not identified\n");
+		return;
+	}
+
+	plr110_info("priv_info=%px - locating fields\n", priv);
+	for (j = 0; j + 8 <= 0x1000; j += 8) {
+		void *q = *(void **)((char *)priv + j);
+		u64 v = *(u64 *)((char *)priv + j);
+
+		if (ptr_is_kernel(q) && !memcmp(q, plr165_phy, 14))
+			plr110_info("  priv+%#zx -> %px = phy_timing_val\n", j, q);
+		if (v == PLR165_CLK_RATE_HZ)
+			plr110_info("  priv+%#zx = clk_rate_hz (%llu)\n", j, v);
+		if (*(u32 *)((char *)priv + j) == 14)
+			plr110_info("  priv+%#zx = 14 (phy_timing_len?)\n", j);
+	}
+}
+
 /* ------------------------------------------------------------- mode kprobe */
 
 static struct kprobe kp_set_mode;
@@ -457,8 +573,8 @@ static int set_mode_pre(struct kprobe *p, struct pt_regs *regs)
 		display_dumped = true;
 		plr110_info("set_mode: display=%px panel=%px\n", display, last_panel);
 		find_ptr_in_struct("struct dsi_display", display, 2048, last_panel);
-		scan_u32_rows("struct dsi_panel", last_panel, 3072, true);
 		dump_drm_connector(display);
+		scan_priv_info();
 	}
 
 	if (dump_modes && m) {
