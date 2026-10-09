@@ -450,88 +450,6 @@ static void scan_words(const char *what, const void *base, size_t bytes,
 	}
 }
 
-static void scan_priv_info(void *mode_ptr)
-{
-	struct plr110_display_mode *cm = mode_ptr;
-	size_t off, j;
-	void *priv = NULL;
-
-	if (!ptr_is_kernel(cm)) {
-		plr110_info("priv scan: mode %px is not a kernel pointer\n", cm);
-		return;
-	}
-
-	plr110_info("full mode=%px  %ux%u @%uHz dsc=%u pxclk=%u flags=%#x "
-		    "caps=%#x fmt=%#x idx=%u\n", cm,
-		    cm->timing.h_active, cm->timing.v_active,
-		    cm->timing.refresh_rate, cm->timing.dsc_enabled,
-		    cm->pixel_clk_khz, cm->dsi_mode_flags, cm->panel_mode_caps,
-		    cm->pixel_format_caps, cm->mode_idx);
-
-	scan_words("struct dsi_display_mode (full, from validate_mode)", cm, 0x100, false);
-
-	/*
-	 * REMOVED: following every kernel-pointer-looking u64 in the mode and
-	 * reading up to 16 KB from each target. That is what crashed the phone.
-	 *
-	 * Android runs with panic_on_oops=1, so a single kernel page fault is a
-	 * full panic and reboot - there is no graceful failure. A raw pointer
-	 * taken from an offset we are not certain about is not a valid object,
-	 * and blind-reading past it faults immediately.
-	 *
-	 * Any future version of this probe must either
-	 *   - use copy_from_kernel_nofault()/probe_kernel_read() so a bad address
-	 *     returns an error instead of oopsing, or
-	 *   - only dereference pointers whose target has already been positively
-	 *     identified, and never read more than the object's real size.
-	 * Until one of those is in place, nothing here follows a pointer.
-	 */
-	plr110_info("priv scan: pointer walking disabled (unsafe without "
-		    "nofault reads; see source comment)\n");
-}
-
-#if 0  /* kept for reference, do not enable as-is */
-static void scan_priv_info_unsafe_tail(void *mode_ptr)
-{
-	struct plr110_display_mode *cm = mode_ptr;
-	size_t off, j;
-	void *priv = NULL;
-
-	for (off = 0; off + 8 <= 0x100; off += 8) {
-		void *p = *(void **)((char *)cm + off);
-		bool hit;
-
-		if (!ptr_is_kernel(p))
-			continue;
-
-		hit = mem_has(p, 0x4000, plr165_phy, sizeof(plr165_phy));
-		plr110_info("  mode+%#04zx -> %px  %08x %08x %08x %08x  phy165=%s\n",
-			    off, p, ((u32 *)p)[0], ((u32 *)p)[1],
-			    ((u32 *)p)[2], ((u32 *)p)[3], hit ? "FOUND" : "-");
-		if (hit)
-			priv = p;
-	}
-
-	if (!priv) {
-		plr110_info("priv scan: priv_info not identified\n");
-		return;
-	}
-
-	plr110_info("priv_info=%px - locating fields\n", priv);
-	for (j = 0; j + 8 <= 0x4000; j += 8) {
-		void *q = *(void **)((char *)priv + j);
-		u64 v = *(u64 *)((char *)priv + j);
-
-		if (ptr_is_kernel(q) && !memcmp(q, plr165_phy, 14))
-			plr110_info("  priv+%#zx -> %px = phy_timing_val\n", j, q);
-		if (v == PLR165_CLK_RATE_HZ)
-			plr110_info("  priv+%#zx = clk_rate_hz (%llu)\n", j, v);
-		if (*(u32 *)((char *)priv + j) == 14)
-			plr110_info("  priv+%#zx = 14 (phy_timing_len?)\n", j);
-	}
-}
-#endif /* 0 - unsafe pointer walking, see the comment above */
-
 /* ------------------------------------------------------- fault-safe reads */
 /*
  * The phone runs with /proc/sys/kernel/panic_on_oops = 1, so a single kernel
@@ -616,6 +534,153 @@ static int nofault_self_test(void *known_object)
 	plr110_info("self-test: PASSED - fault-safe reads available\n");
 	return 0;
 }
+
+/* ------------------------------------------------------- fault-safe scans */
+
+static bool safe_read(void *dst, const void *src, size_t n)
+{
+	if (!nofault_ok)
+		return false;
+	return plr_nofault_read(dst, src, n) == 0;
+}
+
+/*
+ * Search [addr, addr+len) for a byte pattern without ever being able to
+ * fault: every chunk goes through copy_from_kernel_nofault, so an unmapped
+ * page just stops the search. Chunks overlap by nlen-1 so a match straddling
+ * a boundary is still found.
+ */
+#define SAFE_CHUNK 512
+static bool safe_has(const void *addr, size_t len, const u8 *needle, size_t nlen)
+{
+	u8 buf[SAFE_CHUNK];
+	size_t off = 0;
+
+	if (!nofault_ok || !len)
+		return false;
+
+	while (off + nlen <= len) {
+		size_t chunk = len - off;
+
+		if (chunk > sizeof(buf))
+			chunk = sizeof(buf);
+		if (chunk <= nlen)
+			break;
+		if (!safe_read(buf, (const char *)addr + off, chunk))
+			return false;
+		if (mem_has(buf, chunk, needle, nlen))
+			return true;
+		off += chunk - (nlen - 1);
+	}
+	return false;
+}
+
+static void scan_priv_info(void *mode_ptr)
+{
+	u64 w[48];
+	size_t i, j;
+	void *priv = NULL;
+
+	if (!nofault_ok) {
+		plr110_info("priv scan: no nofault reads, refusing to deref\n");
+		return;
+	}
+	if (!safe_read(w, mode_ptr, sizeof(w))) {
+		plr110_info("priv scan: mode %px unreadable\n", mode_ptr);
+		return;
+	}
+
+	plr110_info("mode %px words:\n", mode_ptr);
+	for (i = 0; i < ARRAY_SIZE(w); i += 2)
+		plr110_info("  m+%03zx: %016llx %016llx\n", i * 8, w[i], w[i + 1]);
+
+	for (i = 0; i < ARRAY_SIZE(w); i++) {
+		void *p = (void *)(uintptr_t)w[i];
+		u32 head[4];
+
+		if (!ptr_is_kernel(p))
+			continue;
+
+		if (safe_read(head, p, sizeof(head)))
+			plr110_info("  m+%03zx -> %px : %08x %08x %08x %08x\n",
+				    i * 8, p, head[0], head[1], head[2], head[3]);
+		else
+			plr110_info("  m+%03zx -> %px : unreadable\n", i * 8, p);
+
+		if (safe_has(p, 0x8000, plr165_phy, sizeof(plr165_phy))) {
+			plr110_info("  m+%03zx -> %px : PHY SIGNATURE FOUND\n",
+				    i * 8, p);
+			priv = p;
+		}
+	}
+
+	if (!priv) {
+		plr110_info("priv scan: no target carried the phy table\n");
+		return;
+	}
+
+	plr110_info("priv_info=%px, locating fields:\n", priv);
+	for (j = 0; j + 8 <= 0x4000; j += 8) {
+		u64 v;
+		void *q;
+		u32 u;
+
+		if (!safe_read(&v, (const char *)priv + j, 8))
+			break;
+
+		q = (void *)(uintptr_t)v;
+		if (ptr_is_kernel(q) &&
+		    safe_has(q, 64, plr165_phy, sizeof(plr165_phy)))
+			plr110_info("  priv+%#zx -> %px = phy_timing_val\n", j, q);
+		if (v == PLR165_CLK_RATE_HZ)
+			plr110_info("  priv+%#zx = clk_rate_hz (%llu)\n", j, v);
+		u = (u32)v;
+		if (u == 14)
+			plr110_info("  priv+%#zx = 14 (phy_timing_len?)\n", j);
+	}
+}
+
+#if 0  /* kept for reference, do not enable as-is */
+static void scan_priv_info_unsafe_tail(void *mode_ptr)
+{
+	struct plr110_display_mode *cm = mode_ptr;
+	size_t off, j;
+	void *priv = NULL;
+
+	for (off = 0; off + 8 <= 0x100; off += 8) {
+		void *p = *(void **)((char *)cm + off);
+		bool hit;
+
+		if (!ptr_is_kernel(p))
+			continue;
+
+		hit = mem_has(p, 0x4000, plr165_phy, sizeof(plr165_phy));
+		plr110_info("  mode+%#04zx -> %px  %08x %08x %08x %08x  phy165=%s\n",
+			    off, p, ((u32 *)p)[0], ((u32 *)p)[1],
+			    ((u32 *)p)[2], ((u32 *)p)[3], hit ? "FOUND" : "-");
+		if (hit)
+			priv = p;
+	}
+
+	if (!priv) {
+		plr110_info("priv scan: priv_info not identified\n");
+		return;
+	}
+
+	plr110_info("priv_info=%px - locating fields\n", priv);
+	for (j = 0; j + 8 <= 0x4000; j += 8) {
+		void *q = *(void **)((char *)priv + j);
+		u64 v = *(u64 *)((char *)priv + j);
+
+		if (ptr_is_kernel(q) && !memcmp(q, plr165_phy, 14))
+			plr110_info("  priv+%#zx -> %px = phy_timing_val\n", j, q);
+		if (v == PLR165_CLK_RATE_HZ)
+			plr110_info("  priv+%#zx = clk_rate_hz (%llu)\n", j, v);
+		if (*(u32 *)((char *)priv + j) == 14)
+			plr110_info("  priv+%#zx = 14 (phy_timing_len?)\n", j);
+	}
+}
+#endif /* 0 - unsafe pointer walking, see the comment above */
 
 /* ------------------------------------------------------------- mode kprobe */
 
